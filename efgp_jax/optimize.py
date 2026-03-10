@@ -28,6 +28,7 @@ def optimize_hyperparameters(
     log_marginal_probes: int = 50,
     log_marginal_steps: int = 30,
     verbose: bool = True,
+    use_precond: bool = False,
 ) -> Tuple[Kernel, float, dict]:
     """Optimize GP hyperparameters by minimizing negative log marginal likelihood.
 
@@ -107,6 +108,7 @@ def optimize_hyperparameters(
             compute_log_marginal=True,
             log_marginal_probes=log_marginal_probes,
             log_marginal_steps=log_marginal_steps,
+            use_precond=use_precond,
         )
 
         # Chain rule: d/d(log_theta) = d/d(theta) * theta

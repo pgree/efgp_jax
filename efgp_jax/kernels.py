@@ -43,12 +43,33 @@ class SE(Kernel):
     """Squared Exponential (RBF) kernel.
 
     k(r) = variance * exp(-0.5 * r^2 / lengthscale^2)
+
+    For anisotropic kernels, pass ``lengthscale`` as an array of length
+    ``dim``.  The spectral density factorizes over dimensions.  The
+    ``__call__`` method (which takes scalar distances) only works for
+    the isotropic case.
     """
 
-    def __init__(self, lengthscale: float, variance: float, dim: int = 1):
-        super().__init__(lengthscale, variance, dim)
+    def __init__(self, lengthscale, variance: float, dim: int = 1):
+        l_arr = np.atleast_1d(np.asarray(lengthscale, dtype=float))
+        if l_arr.ndim == 1 and l_arr.size == 1:
+            # scalar — store as plain float, isotropic
+            super().__init__(float(l_arr[0]), variance, dim)
+            self.is_anisotropic = False
+        else:
+            if l_arr.size != dim:
+                raise ValueError(
+                    f"lengthscale array has {l_arr.size} entries but dim={dim}"
+                )
+            super().__init__(l_arr, variance, dim)
+            self.is_anisotropic = True
 
     def __call__(self, r: Array) -> Array:
+        if self.is_anisotropic:
+            raise NotImplementedError(
+                "SE.__call__(r) requires scalar distances; use spectral methods "
+                "for anisotropic kernels"
+            )
         scaled = r / self.lengthscale
         return self.variance * jnp.exp(-0.5 * scaled ** 2)
 
@@ -57,27 +78,40 @@ class SE(Kernel):
         var = self.variance
         dim = self.dim
         xi = jnp.atleast_1d(xi)
-        if xi.ndim == 1:
-            xi_norm_sq = xi ** 2
-        else:
-            xi_norm_sq = jnp.sum(xi ** 2, axis=-1)
         two_pi_sq = (2 * jnp.pi) ** 2
-        prefactor = ((2 * jnp.pi) * l ** 2) ** (dim / 2) * var
-        return prefactor * jnp.exp(-two_pi_sq * l ** 2 * xi_norm_sq / 2)
+        if self.is_anisotropic:
+            l = jnp.asarray(l)
+            # S(xi) = var * prod_d(sqrt(2*pi) * l_d) * exp(-2*pi^2 * sum_d(l_d^2 * xi_d^2))
+            prefactor = var * jnp.prod(jnp.sqrt(2 * jnp.pi) * l)
+            weighted_sq = jnp.sum(l ** 2 * xi ** 2, axis=-1)
+            return prefactor * jnp.exp(-two_pi_sq * weighted_sq / 2)
+        else:
+            if xi.ndim == 1:
+                xi_norm_sq = xi ** 2
+            else:
+                xi_norm_sq = jnp.sum(xi ** 2, axis=-1)
+            prefactor = ((2 * jnp.pi) * l ** 2) ** (dim / 2) * var
+            return prefactor * jnp.exp(-two_pi_sq * l ** 2 * xi_norm_sq / 2)
 
     def spectral_grad(self, xi: Array) -> Tuple[Array, Array]:
-        l = self.lengthscale
         var = self.variance
-        dim = self.dim
-        if xi.ndim == 1:
-            xi_norm_sq = xi ** 2
-        else:
-            xi_norm_sq = jnp.sum(xi ** 2, axis=-1)
         two_pi_sq = (2 * jnp.pi) ** 2
         s_w = self.spectral_density(xi)
-        dl = s_w * (dim / l - two_pi_sq * l * xi_norm_sq)
         dvar = s_w / var
-        return dl, dvar
+        if self.is_anisotropic:
+            l = jnp.asarray(self.lengthscale)
+            # dS/dl_d = S * (1/l_d - (2*pi)^2 * l_d * xi_d^2)
+            dl = s_w[..., None] * (1.0 / l - two_pi_sq * l * xi ** 2)  # (M, d)
+            return dl, dvar
+        else:
+            l = self.lengthscale
+            dim = self.dim
+            if xi.ndim == 1:
+                xi_norm_sq = xi ** 2
+            else:
+                xi_norm_sq = jnp.sum(xi ** 2, axis=-1)
+            dl = s_w * (dim / l - two_pi_sq * l * xi_norm_sq)
+            return dl, dvar
 
     @property
     def name(self) -> str:

@@ -1,11 +1,11 @@
-"""GP discretization via equispaced Fourier expansion.
+"""1D GP discretization via equispaced Fourier expansion.
 
-Demonstrates the spectral representation of a GP without any data or
+Demonstrates the spectral representation of a 1D GP without any data or
 hyperparameter learning.  Plots basis functions, kernel approximation,
 spectral density with quadrature nodes, and prior samples.
 
 Usage:
-    python examples/gp_discretization.py
+    python examples/gp_discretization_1d.py
 """
 
 import os
@@ -111,6 +111,6 @@ ax.set_title(f"Prior samples (SE, l={lengthscale})")
 fig.suptitle(f"EFGP spectral discretization:  SE kernel,  l={lengthscale},  "
              f"var={variance},  eps={eps:0.1e}, M={M} modes", fontsize=13, y=1.01)
 fig.tight_layout()
-out_path = os.path.join(SCRIPT_DIR, "gp_discretization.png")
+out_path = os.path.join(SCRIPT_DIR, "gp_discretization_1d.png")
 fig.savefig(out_path, dpi=150, bbox_inches="tight")
 print(f"\nSaved plot to {out_path}")
