@@ -9,7 +9,7 @@ from jax import Array
 from scipy.optimize import minimize as sp_minimize
 
 from .kernels import Kernel, SE, Matern
-from .efgp import efgp_gradient
+from .efgp import EFGP
 
 
 def optimize_hyperparameters(
@@ -19,6 +19,7 @@ def optimize_hyperparameters(
     sigmasq0: float,
     eps: float,
     *,
+    domain=None,
     key: Array,
     maxiter: int = 50,
     trace_samples: int = 30,
@@ -32,7 +33,7 @@ def optimize_hyperparameters(
 ) -> Tuple[Kernel, float, dict]:
     """Optimize GP hyperparameters by minimizing negative log marginal likelihood.
 
-    Uses L-BFGS-B (via scipy) with gradients from efgp_gradient.
+    Uses L-BFGS-B (via scipy) with gradients from EFGPPosterior.gradient.
     Optimization is performed in log-space to ensure positivity.
 
     Parameters
@@ -45,6 +46,9 @@ def optimize_hyperparameters(
         Initial noise variance.
     eps : float
         EFGP spectral truncation tolerance.
+    domain : tuple or None
+        Domain specification, e.g. (0, 1) for 1D or ((0, 1), (0, 1)) for 2D.
+        If None, inferred from data bounds.
     key : Array
         JAX PRNG key.
     maxiter : int
@@ -74,6 +78,16 @@ def optimize_hyperparameters(
     if cg_tol is None:
         cg_tol = eps / 100
 
+    # Infer domain from data if not provided
+    if domain is None:
+        if x.ndim == 1:
+            domain = (float(jnp.min(x)), float(jnp.max(x)))
+        else:
+            domain = tuple(
+                (float(jnp.min(x[:, i])), float(jnp.max(x[:, i])))
+                for i in range(x.shape[1])
+            )
+
     def _make_kernel(l_val, var_val):
         if isinstance(kernel0, Matern):
             return Matern(lengthscale=l_val, variance=var_val,
@@ -97,18 +111,16 @@ def optimize_hyperparameters(
         sig2_val = float(np.exp(log_theta[2]))
         kernel = _make_kernel(l_val, var_val)
 
-        grad, lml = efgp_gradient(
-            x, y, sigmasq=sig2_val,
-            kernel=kernel,
-            eps=eps, trace_samples=trace_samples,
-            key=subkey,
-            cg_tol=cg_tol,
-            nufft_eps=nufft_eps,
-            use_integral=use_integral,
+        gp = EFGP(kernel, domain, eps,
+                   nufft_eps=nufft_eps, cg_tol=cg_tol,
+                   use_integral=use_integral, use_precond=use_precond)
+        posterior = gp.condition(x, y, sig2_val)
+        grad, lml = posterior.gradient(
+            subkey,
+            trace_samples=trace_samples,
             compute_log_marginal=True,
             log_marginal_probes=log_marginal_probes,
             log_marginal_steps=log_marginal_steps,
-            use_precond=use_precond,
         )
 
         # Chain rule: d/d(log_theta) = d/d(theta) * theta

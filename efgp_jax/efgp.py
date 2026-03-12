@@ -1,8 +1,7 @@
 """Main EFGP algorithm: gradient, predict, fit."""
 
 import math
-from math import prod
-from typing import NamedTuple, Optional, Tuple
+from typing import Tuple
 
 import jax
 import jax.numpy as jnp
@@ -22,21 +21,38 @@ from .nufft import _make_phi, nufft_type1, nufft_type2, _cmplx
 # ---------------------------------------------------------------------------
 
 
-class EFGPSetup(NamedTuple):
-    """Cached setup for EFGP computations."""
-    xis: Array
-    h: float
-    mtot: int
-    ws: Array
-    phi: tuple
-    toeplitz_op: ToeplitzND
-    xcen: Array
-    OUT: tuple
-    cdtype: type
-    d: int
+def _parse_domain(domain, d):
+    """Parse domain specification into L (extent) and xcen (center).
+
+    Parameters
+    ----------
+    domain : tuple
+        1D: (lo, hi) — a single interval.
+        nD: ((lo1, hi1), (lo2, hi2), ...) — one interval per dimension.
+
+    Returns
+    -------
+    L : float
+        Max extent across dimensions.
+    xcen : array, shape (d,)
+        Midpoint of the domain.
+    """
+    # 1D shorthand: (lo, hi)
+    if d == 1 and not isinstance(domain[0], (tuple, list)):
+        lo, hi = float(domain[0]), float(domain[1])
+        return hi - lo, jnp.array([(lo + hi) / 2.0])
+
+    # nD: tuple of intervals
+    assert len(domain) == d, f"Expected {d} intervals, got {len(domain)}"
+    los = [float(interval[0]) for interval in domain]
+    his = [float(interval[1]) for interval in domain]
+    extents = [hi - lo for lo, hi in zip(los, his)]
+    centers = [(lo + hi) / 2.0 for lo, hi in zip(los, his)]
+    L = max(extents)
+    return L, jnp.array(centers)
 
 
-def _compute_convolution_vector(m, x: Array, h, nufft_eps: float = 6e-8) -> Array:
+def _compute_convolution_vector(m, x, h, xcen, nufft_eps=6e-8):
     """Multi-D type-1 NUFFT convolution vector: v[k] = sum_n exp(2 pi i <k, x_n>).
 
     Parameters
@@ -45,12 +61,13 @@ def _compute_convolution_vector(m, x: Array, h, nufft_eps: float = 6e-8) -> Arra
         Half-width per dimension. If int, same for all dimensions.
     h : float or Array
         Frequency spacing, scalar or per-dimension array.
+    xcen : Array
+        Center for NUFFT phase computation.
     """
     if x.ndim == 1:
         x = x[:, None]
     N, d = x.shape
     cdtype = _cmplx(x.dtype)
-    xcen = jnp.zeros(d)
     c = jnp.ones(N, dtype=cdtype)
     if isinstance(m, (tuple, list)):
         OUT = tuple(4 * mi + 1 for mi in m)
@@ -63,47 +80,6 @@ def _compute_convolution_vector(m, x: Array, h, nufft_eps: float = 6e-8) -> Arra
 def _is_anisotropic(kernel):
     """Check if kernel has per-dimension lengthscales."""
     return getattr(kernel, 'is_anisotropic', False)
-
-
-def _setup_efgp(x, kernel, eps, nufft_eps, use_integral):
-    """Common setup for all EFGP functions: frequency grid, NUFFT, Toeplitz."""
-    if x.ndim == 1:
-        x = x[:, None]
-    N, d = x.shape
-    cdtype = _cmplx(x.dtype)
-    L = float(jnp.max(jnp.max(x, axis=0) - jnp.min(x, axis=0)))
-
-    if _is_anisotropic(kernel):
-        l_arr = np.asarray(kernel.lengthscale)
-        grids_1d = []
-        for i in range(d):
-            k1d = SE(lengthscale=float(l_arr[i]), variance=kernel.variance, dim=1)
-            xis_1d_i, h_i, mtot_i = get_xis(k1d, eps, L, use_integral=use_integral)
-            grids_1d.append((xis_1d_i, h_i, mtot_i))
-        h = jnp.array([g[1] for g in grids_1d])
-        mtot = tuple(g[2] for g in grids_1d)
-        OUT = mtot
-        grids = jnp.meshgrid(*[g[0] for g in grids_1d], indexing="ij")
-        xis = jnp.stack([g.ravel() for g in grids], axis=-1)
-        ws = jnp.sqrt(kernel.spectral_density(xis).astype(cdtype) * jnp.prod(h))
-        m_conv = tuple((m - 1) // 2 for m in mtot)
-    else:
-        xis_1d, h, mtot = get_xis(kernel, eps, L, use_integral=use_integral)
-        grids = jnp.meshgrid(*[xis_1d for _ in range(d)], indexing="ij")
-        xis = jnp.stack([g.ravel() for g in grids], axis=-1)
-        ws = jnp.sqrt(kernel.spectral_density(xis).astype(cdtype) * h ** d)
-        OUT = (mtot,) * d
-        m_conv = (mtot - 1) // 2
-
-    xcen = jnp.zeros(d)
-    phi = _make_phi(x, xcen, h)
-
-    v_kernel = _compute_convolution_vector(m_conv, x, h, nufft_eps).astype(cdtype)
-    toeplitz_op = make_toeplitz(v_kernel, force_pow2=True)
-
-    return EFGPSetup(xis=xis, h=h, mtot=mtot, ws=ws, phi=phi,
-                     toeplitz_op=toeplitz_op, xcen=xcen, OUT=OUT,
-                     cdtype=cdtype, d=d)
 
 
 def _create_Gv(ws, toeplitz_op, cdtype):
@@ -232,346 +208,6 @@ def logdet_slq(
 
 
 # ---------------------------------------------------------------------------
-# EFGP gradient
-# ---------------------------------------------------------------------------
-
-def efgp_gradient(
-    x: Array,
-    y: Array,
-    sigmasq: float,
-    kernel: Kernel,
-    eps: float,
-    trace_samples: int = 10,
-    *,
-    nufft_eps: float = 6e-8,
-    cg_tol: Optional[float] = None,
-    use_integral: bool = True,
-    key: Array,
-    compute_log_marginal: bool = False,
-    log_marginal_probes: int = 100,
-    log_marginal_steps: int = 25,
-    use_precond: bool = False,
-) -> Array:
-    """Gradient of the negative log marginal likelihood w.r.t. hyperparameters.
-
-    Returns grad of shape (num_hypers,) = [d/dl, d/dvar, d/dsigmasq].
-    If compute_log_marginal is True, returns (grad, log_marginal).
-    """
-    if cg_tol is None:
-        cg_tol = eps
-
-    if x.ndim == 1:
-        x = x[:, None]
-    N, d = x.shape
-
-    s = _setup_efgp(x, kernel, eps, nufft_eps, use_integral)
-    cdtype = s.cdtype
-    ws, phi, toeplitz_op, OUT = s.ws, s.phi, s.toeplitz_op, s.OUT
-
-    # Spectral gradients
-    dl, dvar = kernel.spectral_grad(s.xis)
-    h_vol = jnp.prod(jnp.asarray(s.h)) if _is_anisotropic(kernel) else s.h ** d
-    if dl.ndim == 2:
-        # anisotropic: dl is (M, d), dvar is (M,)
-        Dprime = jnp.concatenate([dl, dvar[:, None]], axis=-1).astype(cdtype) * h_vol
-    else:
-        Dprime = jnp.stack([dl, dvar], axis=-1).astype(cdtype) * h_vol  # (M, 2)
-
-    fadj = lambda v: nufft_type1(phi, v.astype(cdtype), OUT, eps=nufft_eps).reshape(-1)
-    fwd = lambda fk: nufft_type2(phi, fk.reshape(OUT) if fk.ndim == 1 else fk, eps=nufft_eps)
-
-    A_apply = _create_A_mean(ws, toeplitz_op, sigmasq, cdtype)
-    M_inv = _make_diag_precond(ws, N, sigmasq, "mean") if use_precond else None
-
-    # Solve A beta = ws * F* y
-    Fy = fadj(y.astype(cdtype))
-    rhs = ws * Fy
-    beta = cg_solve(A_apply, rhs, tol=cg_tol, M_inv_apply=M_inv)
-    beta = beta * ws
-    z_pred = fwd(beta)
-    alpha = (y.astype(cdtype) - z_pred) / sigmasq
-
-    # Term 2: (alpha' D' alpha, alpha' alpha)
-    fadj_alpha = (Fy - toeplitz_apply(toeplitz_op, beta)) / sigmasq
-    Hk = Dprime.shape[-1]  # number of kernel hyperparameters
-    term2_parts = [jnp.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha) for i in range(Hk)]
-    term2_parts.append(jnp.vdot(alpha, alpha))
-    term2 = jnp.array(term2_parts)
-
-    # Monte-Carlo trace (term 1)
-    T = trace_samples
-    num_hypers = Hk + 1  # kernel grads + noise
-
-    key, subkey = jax.random.split(key)
-    rdtype = jnp.float64 if cdtype == jnp.complex128 else jnp.float32
-    Z = 2.0 * jax.random.bernoulli(subkey, shape=(T, N)).astype(rdtype) - 1.0
-    Z_c = Z.astype(cdtype)
-
-    # F* Z
-    fadjZ_list = []
-    for i in range(T):
-        fadjZ_list.append(fadj(Z_c[i]))
-    fadjZ_flat = jnp.stack(fadjZ_list)  # (T, M)
-
-    # Build all RHS for batched CG
-    Di_FZ_all = jnp.concatenate(
-        [Dprime[:, i][None, :] * fadjZ_flat for i in range(Hk)], axis=0
-    )  # (Hk*T, M)
-
-    # NUFFT type-2 for kernel terms
-    rhs_all_kernel = []
-    for i in range(Hk * T):
-        rhs_all_kernel.append(fwd(Di_FZ_all[i]))
-    rhs_all_kernel = jnp.stack(rhs_all_kernel).reshape(Hk, T, -1)  # (Hk, T, N)
-
-    # Toeplitz for B
-    B_all_kernel = []
-    for i in range(Hk * T):
-        B_all_kernel.append(ws * toeplitz_apply(toeplitz_op, Di_FZ_all[i]))
-    B_all_kernel = jnp.stack(B_all_kernel).reshape(Hk, T, -1)  # (Hk, T, M)
-
-    # Noise term
-    rhs_noise = Z_c  # (T, N)
-    B_noise = ws[None, :] * fadjZ_flat  # (T, M)
-
-    R_all = jnp.concatenate(
-        [rhs_all_kernel.reshape(Hk * T, -1), rhs_noise], axis=0
-    )  # (num_hypers*T, N)
-    B_all = jnp.concatenate(
-        [B_all_kernel.reshape(Hk * T, -1), B_noise], axis=0
-    )  # (num_hypers*T, M)
-
-    # Batched CG
-    Beta_all = cg_solve_batched(A_apply, B_all, tol=cg_tol, M_inv_apply=M_inv)
-    Beta_all = Beta_all * ws[None, :]
-
-    # Compute alpha for each probe
-    fwdBeta_list = []
-    for i in range(num_hypers * T):
-        fwdBeta_list.append(fwd(Beta_all[i]))
-    fwdBeta = jnp.stack(fwdBeta_list)
-
-    Alpha_batch = (R_all - fwdBeta) / sigmasq
-    Alpha_batch = Alpha_batch.reshape(num_hypers, T, -1)
-    term1 = jnp.mean(jnp.sum(Z_c[None, :, :] * Alpha_batch, axis=2), axis=1)
-
-    # Gradient
-    grad = 0.5 * (term1 - term2)
-
-    if compute_log_marginal:
-        key, subkey = jax.random.split(key)
-        det_term = logdet_slq(
-            ws, sigmasq, toeplitz_op,
-            probes=log_marginal_probes,
-            steps=log_marginal_steps,
-            key=subkey, n=N,
-        )
-        vdot_term = jnp.vdot(y.astype(cdtype), alpha).real
-        log_marg = -0.5 * vdot_term - 0.5 * det_term - 0.5 * N * math.log(2 * math.pi)
-        return jnp.real(grad), float(log_marg)
-
-    return jnp.real(grad)
-
-
-# ---------------------------------------------------------------------------
-# EFGP predict
-# ---------------------------------------------------------------------------
-
-def efgp_predict(
-    x: Array,
-    y: Array,
-    x_new: Array,
-    kernel: Kernel,
-    sigmasq: float,
-    eps: float,
-    *,
-    nufft_eps: float = 6e-8,
-    cg_tol: float = 1e-4,
-    use_integral: bool = True,
-) -> Array:
-    """Posterior mean at x_new using EFGP.
-
-    Returns
-    -------
-    yhat : Array, shape (n_new,)
-    """
-    if x.ndim == 1:
-        x = x[:, None]
-    if x_new.ndim == 1:
-        x_new = x_new[:, None]
-
-    s = _setup_efgp(x, kernel, eps, nufft_eps, use_integral)
-    cdtype = s.cdtype
-    ws, phi, toeplitz_op, OUT = s.ws, s.phi, s.toeplitz_op, s.OUT
-
-    fadj = lambda v: nufft_type1(phi, v.astype(cdtype), OUT, eps=nufft_eps).reshape(-1)
-    A_mean = _create_A_mean(ws, toeplitz_op, sigmasq, cdtype)
-
-    # Solve for beta
-    Fy = fadj(y.astype(cdtype))
-    rhs = ws * Fy
-    beta = cg_solve(A_mean, rhs, tol=cg_tol)
-
-    # Predict at new points
-    phi_new = _make_phi(x_new, s.xcen, s.h)
-    yhat = nufft_type2(phi_new, (ws * beta).reshape(OUT), eps=nufft_eps)
-    return jnp.real(yhat)
-
-
-# ---------------------------------------------------------------------------
-# EFGP predict with variance
-# ---------------------------------------------------------------------------
-
-def efgp_predict_var(
-    x: Array,
-    y: Array,
-    x_new: Array,
-    kernel: Kernel,
-    sigmasq: float,
-    eps: float,
-    *,
-    nufft_eps: float = 6e-8,
-    cg_tol: float = 1e-4,
-    use_integral: bool = True,
-    max_cg_iter: int = 1000,
-) -> Tuple[Array, Array]:
-    """Posterior mean and variance at x_new using EFGP (regular method).
-
-    Returns
-    -------
-    yhat : Array, shape (n_new,)
-    var : Array, shape (n_new,)
-    """
-    TWO_PI = 2 * math.pi
-
-    if x.ndim == 1:
-        x = x[:, None]
-    if x_new.ndim == 1:
-        x_new = x_new[:, None]
-
-    s = _setup_efgp(x, kernel, eps, nufft_eps, use_integral)
-    cdtype, d = s.cdtype, s.d
-    ws, phi, toeplitz_op, OUT = s.ws, s.phi, s.toeplitz_op, s.OUT
-
-    fadj = lambda v: nufft_type1(phi, v.astype(cdtype), OUT, eps=nufft_eps).reshape(-1)
-    A_mean = _create_A_mean(ws, toeplitz_op, sigmasq, cdtype)
-    A_var = _create_A_var(ws, toeplitz_op, sigmasq, cdtype)
-
-    # Solve for mean
-    Fy = fadj(y.astype(cdtype))
-    rhs_mean = ws * Fy
-    beta = cg_solve(A_mean, rhs_mean, tol=cg_tol)
-
-    # Predict mean at new points
-    phi_new = _make_phi(x_new, s.xcen, s.h)
-    yhat = jnp.real(nufft_type2(phi_new, (ws * beta).reshape(OUT), eps=nufft_eps))
-
-    # Variance via direct CG
-    xis_flat = s.xis.reshape(-1, d)
-    fx = jnp.exp(TWO_PI * 1j * (x_new @ xis_flat.T)).astype(cdtype)  # (B, m)
-    rhs_var = ws[None, :] * jnp.conj(fx)  # (B, m)
-    gamma = cg_solve_batched(A_var, rhs_var, tol=cg_tol, max_iter=max_cg_iter)
-    var = jnp.real(jnp.sum(fx * (ws[None, :] * gamma), axis=-1))
-    var = jnp.clip(var, 0.0)
-
-    return yhat, var
-
-
-# ---------------------------------------------------------------------------
-# EFGP posterior sampling via Matheron rule
-# ---------------------------------------------------------------------------
-
-def efgp_sample_posterior(
-    x: Array,
-    y: Array,
-    x_new: Array,
-    kernel: Kernel,
-    sigmasq: float,
-    eps: float,
-    key: Array,
-    n_samples: int = 1,
-    *,
-    nufft_eps: float = 6e-8,
-    cg_tol: float = 1e-4,
-    use_integral: bool = True,
-) -> Array:
-    """Draw posterior samples at x_new via the Matheron rule (pathwise conditioning).
-
-    f_post(x*) = f_prior(x*) + K(x*,X)(K(X,X)+sigma^2 I)^{-1}(y - f_prior(X) - eps)
-
-    All operations use NUFFT + CG, giving O(M log M + N) per sample.
-
-    Parameters
-    ----------
-    x : Array, shape (n,) or (n, d)
-    y : Array, shape (n,)
-    x_new : Array, shape (n_new,) or (n_new, d)
-    kernel : Kernel
-    sigmasq : float
-    eps : float
-    key : JAX PRNG key
-    n_samples : int
-    nufft_eps : float
-    cg_tol : float
-    use_integral : bool
-
-    Returns
-    -------
-    samples : Array, shape (n_new,) if n_samples==1, else (n_samples, n_new)
-    """
-    if x.ndim == 1:
-        x = x[:, None]
-    if x_new.ndim == 1:
-        x_new = x_new[:, None]
-
-    N = x.shape[0]
-    s = _setup_efgp(x, kernel, eps, nufft_eps, use_integral)
-    cdtype = s.cdtype
-    ws, phi, toeplitz_op, OUT = s.ws, s.phi, s.toeplitz_op, s.OUT
-    M = ws.shape[0]
-
-    # Random Fourier coefficients for prior samples
-    # z = a + ib with a, b ~ N(0,1) so Re[Phi W z] has covariance K
-    key1, key2, key3 = jax.random.split(key, 3)
-    z_real = jax.random.normal(key1, shape=(n_samples, M))
-    z_imag = jax.random.normal(key2, shape=(n_samples, M))
-    z = (z_real + 1j * z_imag).astype(cdtype)
-
-    # Weighted coefficients for NUFFT
-    wz = (ws[None, :] * z).reshape(n_samples, *OUT)
-
-    # Prior at training points
-    f_prior_x = jnp.real(nufft_type2(phi, wz, eps=nufft_eps))  # (n_samples, N)
-
-    # Prior at prediction points
-    phi_new = _make_phi(x_new, s.xcen, s.h)
-    f_prior_xnew = jnp.real(nufft_type2(phi_new, wz, eps=nufft_eps))  # (n_samples, n_new)
-
-    # Residual: y - f_prior(X) - sqrt(sigma^2) * noise
-    noise = jax.random.normal(key3, shape=(n_samples, N))
-    r = y[None, :] - f_prior_x - jnp.sqrt(sigmasq) * noise  # (n_samples, N)
-
-    # Adjoint NUFFT: Phi^H r
-    Fr = nufft_type1(phi, r.astype(cdtype), OUT, eps=nufft_eps)  # (n_samples, *OUT)
-    Fr = Fr.reshape(n_samples, -1)  # (n_samples, M)
-
-    # CG solve in frequency domain
-    rhs = ws[None, :] * Fr
-    A_mean = _create_A_mean(ws, toeplitz_op, sigmasq, cdtype)
-    beta = cg_solve_batched(A_mean, rhs, tol=cg_tol)  # (n_samples, M)
-
-    # Correction at prediction points
-    correction_coeffs = (ws[None, :] * beta).reshape(n_samples, *OUT)
-    correction = jnp.real(nufft_type2(phi_new, correction_coeffs, eps=nufft_eps))
-
-    samples = f_prior_xnew + correction
-
-    if n_samples == 1:
-        return samples[0]
-    return samples
-
-
-# ---------------------------------------------------------------------------
 # EFGP class
 # ---------------------------------------------------------------------------
 
@@ -579,8 +215,8 @@ class EFGP:
     """Spectral approximation of a GP prior.
 
     Precomputes the frequency grid and spectral weights from the kernel,
-    domain size ``L``, and truncation tolerance ``eps``.  These do *not*
-    depend on training data.
+    domain, and truncation tolerance ``eps``.  These do *not* depend on
+    training data.
 
     Use :meth:`condition` to bind training locations, observations, and a
     noise model, producing an :class:`EFGPPosterior`.
@@ -589,20 +225,22 @@ class EFGP:
     ----------
     kernel : Kernel
         Kernel object (e.g. ``SE(...)`` or ``Matern(...)``).
-    L : float
-        Domain size (max extent of the data region).
+    domain : tuple
+        1D: ``(lo, hi)`` — the interval on which the GP lives.
+        nD: ``((lo1, hi1), (lo2, hi2), ...)`` — one interval per dimension.
     eps : float
         Spectral truncation tolerance (smaller = more frequencies).
     nufft_eps : float
     cg_tol : float
     use_integral : bool
+    use_precond : bool
     """
 
-    def __init__(self, kernel, L, eps, *,
+    def __init__(self, kernel, domain, eps, *,
                  nufft_eps=6e-8, cg_tol=1e-6, use_integral=True,
                  use_precond=False):
         self.kernel = kernel
-        self.L = float(L)
+        self.domain = domain
         self.eps = eps
         self.nufft_eps = nufft_eps
         self.cg_tol = cg_tol
@@ -612,6 +250,10 @@ class EFGP:
         d = kernel.dim
         self.d = d
         cdtype = jnp.complex128  # default to float64
+
+        L, xcen = _parse_domain(domain, d)
+        self.L = L
+        self.xcen = xcen
 
         if _is_anisotropic(kernel):
             l_arr = np.asarray(kernel.lengthscale)
@@ -639,7 +281,6 @@ class EFGP:
         self.h = h
         self.mtot = mtot
         self.ws = ws
-        self.xcen = jnp.zeros(d)
         self.OUT = OUT
         self.cdtype = cdtype
         self.M = ws.shape[0]
@@ -711,7 +352,7 @@ class EFGP:
             ws = ws[indices]
 
         # phases: (N, K) where K = number of selected basis functions
-        phases = 2 * math.pi * (x @ xis.T)  # (N, K)
+        phases = 2 * math.pi * ((x - self.xcen) @ xis.T)  # (N, K)
         cos_part = ws[None, :] * jnp.cos(phases)
         sin_part = ws[None, :] * jnp.sin(phases)
         return cos_part, sin_part
@@ -766,7 +407,9 @@ class EFGPPosterior:
             m_conv = tuple((m - 1) // 2 for m in p.mtot)
         else:
             m_conv = (p.mtot - 1) // 2
-        v_kernel = _compute_convolution_vector(m_conv, x, p.h, p.nufft_eps).astype(p.cdtype)
+        v_kernel = _compute_convolution_vector(
+            m_conv, x, p.h, p.xcen, p.nufft_eps
+        ).astype(p.cdtype)
         self.toeplitz_op = make_toeplitz(v_kernel, force_pow2=True)
 
     def _solve(self):
@@ -816,7 +459,7 @@ class EFGPPosterior:
         A_var = _create_A_var(p.ws, self.toeplitz_op, self.sigmasq, p.cdtype)
         M_inv_var = _make_diag_precond(p.ws, self.N, self.sigmasq, "var") if p.use_precond else None
         xis_flat = p.xis.reshape(-1, p.d)
-        fx = jnp.exp(TWO_PI * 1j * (x_new @ xis_flat.T)).astype(p.cdtype)
+        fx = jnp.exp(TWO_PI * 1j * ((x_new - p.xcen) @ xis_flat.T)).astype(p.cdtype)
         rhs_var = p.ws[None, :] * jnp.conj(fx)
         gamma = cg_solve_batched(A_var, rhs_var, tol=p.cg_tol, max_iter=max_cg_iter,
                                  M_inv_apply=M_inv_var)
@@ -871,3 +514,122 @@ class EFGPPosterior:
         if n_samples == 1:
             return samples[0]
         return samples
+
+    def gradient(self, key, *, trace_samples=10, compute_log_marginal=False,
+                 log_marginal_probes=100, log_marginal_steps=25):
+        """Gradient of the negative log marginal likelihood w.r.t. hyperparameters.
+
+        Returns grad of shape (num_hypers,) = [d/dl, d/dvar, d/dsigmasq].
+        If compute_log_marginal is True, returns (grad, log_marginal).
+        """
+        p = self.prior
+        cg_tol = p.cg_tol
+        nufft_eps = p.nufft_eps
+        N, d = self.N, p.d
+        cdtype = p.cdtype
+        ws = p.ws
+        toeplitz_op = self.toeplitz_op
+
+        # Spectral gradients
+        dl, dvar = p.kernel.spectral_grad(p.xis)
+        h_vol = jnp.prod(jnp.asarray(p.h)) if _is_anisotropic(p.kernel) else p.h ** d
+        if dl.ndim == 2:
+            # anisotropic: dl is (M, d), dvar is (M,)
+            Dprime = jnp.concatenate([dl, dvar[:, None]], axis=-1).astype(cdtype) * h_vol
+        else:
+            Dprime = jnp.stack([dl, dvar], axis=-1).astype(cdtype) * h_vol  # (M, 2)
+
+        fadj = lambda v: nufft_type1(self.phi, v.astype(cdtype), p.OUT, eps=nufft_eps).reshape(-1)
+        fwd = lambda fk: nufft_type2(self.phi, fk.reshape(p.OUT) if fk.ndim == 1 else fk, eps=nufft_eps)
+
+        A_apply = _create_A_mean(ws, toeplitz_op, self.sigmasq, cdtype)
+        M_inv = _make_diag_precond(ws, N, self.sigmasq, "mean") if p.use_precond else None
+
+        # Solve A beta = ws * F* y
+        Fy = fadj(self.y.astype(cdtype))
+        rhs = ws * Fy
+        beta = cg_solve(A_apply, rhs, tol=cg_tol, M_inv_apply=M_inv)
+        beta = beta * ws
+        z_pred = fwd(beta)
+        alpha = (self.y.astype(cdtype) - z_pred) / self.sigmasq
+
+        # Term 2: (alpha' D' alpha, alpha' alpha)
+        fadj_alpha = (Fy - toeplitz_apply(toeplitz_op, beta)) / self.sigmasq
+        Hk = Dprime.shape[-1]  # number of kernel hyperparameters
+        term2_parts = [jnp.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha) for i in range(Hk)]
+        term2_parts.append(jnp.vdot(alpha, alpha))
+        term2 = jnp.array(term2_parts)
+
+        # Monte-Carlo trace (term 1)
+        T = trace_samples
+        num_hypers = Hk + 1  # kernel grads + noise
+
+        key, subkey = jax.random.split(key)
+        rdtype = jnp.float64 if cdtype == jnp.complex128 else jnp.float32
+        Z = 2.0 * jax.random.bernoulli(subkey, shape=(T, N)).astype(rdtype) - 1.0
+        Z_c = Z.astype(cdtype)
+
+        # F* Z
+        fadjZ_list = []
+        for i in range(T):
+            fadjZ_list.append(fadj(Z_c[i]))
+        fadjZ_flat = jnp.stack(fadjZ_list)  # (T, M)
+
+        # Build all RHS for batched CG
+        Di_FZ_all = jnp.concatenate(
+            [Dprime[:, i][None, :] * fadjZ_flat for i in range(Hk)], axis=0
+        )  # (Hk*T, M)
+
+        # NUFFT type-2 for kernel terms
+        rhs_all_kernel = []
+        for i in range(Hk * T):
+            rhs_all_kernel.append(fwd(Di_FZ_all[i]))
+        rhs_all_kernel = jnp.stack(rhs_all_kernel).reshape(Hk, T, -1)  # (Hk, T, N)
+
+        # Toeplitz for B
+        B_all_kernel = []
+        for i in range(Hk * T):
+            B_all_kernel.append(ws * toeplitz_apply(toeplitz_op, Di_FZ_all[i]))
+        B_all_kernel = jnp.stack(B_all_kernel).reshape(Hk, T, -1)  # (Hk, T, M)
+
+        # Noise term
+        rhs_noise = Z_c  # (T, N)
+        B_noise = ws[None, :] * fadjZ_flat  # (T, M)
+
+        R_all = jnp.concatenate(
+            [rhs_all_kernel.reshape(Hk * T, -1), rhs_noise], axis=0
+        )  # (num_hypers*T, N)
+        B_all = jnp.concatenate(
+            [B_all_kernel.reshape(Hk * T, -1), B_noise], axis=0
+        )  # (num_hypers*T, M)
+
+        # Batched CG
+        Beta_all = cg_solve_batched(A_apply, B_all, tol=cg_tol, M_inv_apply=M_inv)
+        Beta_all = Beta_all * ws[None, :]
+
+        # Compute alpha for each probe
+        fwdBeta_list = []
+        for i in range(num_hypers * T):
+            fwdBeta_list.append(fwd(Beta_all[i]))
+        fwdBeta = jnp.stack(fwdBeta_list)
+
+        Alpha_batch = (R_all - fwdBeta) / self.sigmasq
+        Alpha_batch = Alpha_batch.reshape(num_hypers, T, -1)
+        term1 = jnp.mean(jnp.sum(Z_c[None, :, :] * Alpha_batch, axis=2), axis=1)
+
+        # Gradient
+        grad = 0.5 * (term1 - term2)
+
+        if compute_log_marginal:
+            key, subkey = jax.random.split(key)
+            det_term = logdet_slq(
+                ws, self.sigmasq, toeplitz_op,
+                probes=log_marginal_probes,
+                steps=log_marginal_steps,
+                key=subkey, n=N,
+            )
+            vdot_term = jnp.vdot(self.y.astype(cdtype), alpha).real
+            log_marg = -0.5 * vdot_term - 0.5 * det_term - 0.5 * N * math.log(2 * math.pi)
+            return jnp.real(grad), float(log_marg)
+
+        return jnp.real(grad)

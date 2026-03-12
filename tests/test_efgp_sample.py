@@ -1,4 +1,4 @@
-"""Tests for efgp_sample_posterior (Matheron rule posterior sampling)."""
+"""Tests for EFGPPosterior.sample (Matheron rule posterior sampling)."""
 
 import jax
 jax.config.update("jax_enable_x64", True)
@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import pytest
 
 from efgp_jax.kernels import SE, pairwise_distances
-from efgp_jax.efgp import efgp_predict, efgp_predict_var, efgp_sample_posterior
+from efgp_jax.efgp import EFGP
 from efgp_jax.gp import sample_posterior
 
 
@@ -31,10 +31,9 @@ def test_shape_single():
     x_new = jnp.linspace(0.0, 1.0, 30)
     key = jax.random.PRNGKey(42)
 
-    s = efgp_sample_posterior(
-        x, y, x_new, kernel, sigmasq=0.01, eps=EPSILON,
-        key=key, n_samples=1,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=EPSILON)
+    posterior = gp.condition(x, y, 0.01)
+    s = posterior.sample(x_new, key=key, n_samples=1)
     assert s.shape == (30,)
 
 
@@ -44,34 +43,29 @@ def test_shape_multi():
     x_new = jnp.linspace(0.0, 1.0, 30)
     key = jax.random.PRNGKey(42)
 
-    s = efgp_sample_posterior(
-        x, y, x_new, kernel, sigmasq=0.01, eps=EPSILON,
-        key=key, n_samples=7,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=EPSILON)
+    posterior = gp.condition(x, y, 0.01)
+    s = posterior.sample(x_new, key=key, n_samples=7)
     assert s.shape == (7, 30)
 
 
 def test_statistics_match_efgp_predict():
-    """Empirical mean/variance of many samples should match efgp_predict / efgp_predict_var."""
+    """Empirical mean/variance of many samples should match predict / predict_var."""
     x, y, kernel = _make_small_dataset(n=80, seed=1)
     x_new = jnp.linspace(0.1, 0.9, 20)
     sigmasq = 0.01
 
+    gp = EFGP(kernel, domain=(0, 1), eps=EPSILON)
+    posterior = gp.condition(x, y, sigmasq)
+
     # Reference mean and variance
-    yhat = efgp_predict(
-        x, y, x_new, kernel, sigmasq=sigmasq, eps=EPSILON,
-    )
-    _, var = efgp_predict_var(
-        x, y, x_new, kernel, sigmasq=sigmasq, eps=EPSILON,
-    )
+    yhat = posterior.predict(x_new)
+    _, var = posterior.predict(x_new, return_var=True)
 
     # Draw many posterior samples
     n_samples = 5_000
     key = jax.random.PRNGKey(123)
-    samples = efgp_sample_posterior(
-        x, y, x_new, kernel, sigmasq=sigmasq, eps=EPSILON,
-        key=key, n_samples=n_samples,
-    )
+    samples = posterior.sample(x_new, key=key, n_samples=n_samples)
     assert samples.shape == (n_samples, 20)
 
     emp_mean = jnp.mean(samples, axis=0)
@@ -100,10 +94,9 @@ def test_small_data_vs_cholesky():
 
     # EFGP samples
     key = jax.random.PRNGKey(0)
-    efgp_samples = efgp_sample_posterior(
-        x, y, x_new, kernel, sigmasq=sigmasq, eps=EPSILON,
-        key=key, n_samples=n_samples,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=EPSILON)
+    posterior = gp.condition(x, y, sigmasq)
+    efgp_samples = posterior.sample(x_new, key=key, n_samples=n_samples)
 
     # Cholesky samples
     key = jax.random.PRNGKey(1)

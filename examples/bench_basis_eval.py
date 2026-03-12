@@ -57,7 +57,7 @@ fig, ax = plt.subplots(figsize=(8, 5))
 
 for cfg in configs:
     kernel = SE(lengthscale=cfg["lengthscale"], variance=1.0, dim=1)
-    gp = EFGP(kernel, L=1.0, eps=cfg["eps"])
+    gp = EFGP(kernel, domain=(0, 1), eps=cfg["eps"])
     M = gp.M
     print(f"l={cfg['lengthscale']} -> M={M}")
 

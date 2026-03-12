@@ -25,13 +25,13 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # -----------------------------------------------------------------------
 # Setup
 # -----------------------------------------------------------------------
-L = 1.0 # GP defined on [0, L]^2
+domain_iso = ((0, 1), (0, 1))
 lengthscale = 0.1
 variance = 1.0
 eps = 1e-3
 
 kernel = SE(lengthscale=lengthscale, variance=variance, dim=2)
-gp = EFGP(kernel, L=L, eps=eps)
+gp = EFGP(kernel, domain=domain_iso, eps=eps)
 
 xis = gp.xis  # (M, 2)
 ws = gp.ws
@@ -39,13 +39,13 @@ M = gp.M
 mtot = gp.mtot
 
 print(f"Kernel: SE(l={lengthscale}, var={variance}, dim=2, eps={eps})")
-print(f"Domain: [0, {L}]^2")
+print(f"Domain: {domain_iso}")
 print(f"Spectral grid: {mtot} x {mtot} = {M} frequencies, spacing h={gp.h:.6f}")
 
 # Evaluation grid
 n_grid = 200
-x1 = jnp.linspace(0, L, n_grid)
-x2 = jnp.linspace(0, L, n_grid)
+x1 = jnp.linspace(domain_iso[0][0], domain_iso[0][1], n_grid)
+x2 = jnp.linspace(domain_iso[1][0], domain_iso[1][1], n_grid)
 X1, X2 = jnp.meshgrid(x1, x2, indexing="ij")
 x_flat = jnp.stack([X1.ravel(), X2.ravel()], axis=-1)  # (n_grid^2, 2)
 
@@ -75,7 +75,7 @@ ax.set_aspect("equal")
 
 # --- Panel 2: Kernel slice along x1 (x2=0) ---
 ax = axes[0, 1]
-r = jnp.linspace(0, L, 300)
+r = jnp.linspace(0, gp.L, 300)
 K_exact = kernel(r)
 
 # Spectral approximation: k(r,0) = sum_j |w_j|^2 cos(2pi xi_j1 * r)
@@ -94,7 +94,7 @@ ax.legend(fontsize=8)
 
 # --- Panel 3: Kernel slice along diagonal (x1=x2=r/sqrt(2)) ---
 ax = axes[1, 0]
-r_diag = jnp.linspace(0, L * math.sqrt(2), 300)
+r_diag = jnp.linspace(0, gp.L * math.sqrt(2), 300)
 K_exact_diag = kernel(r_diag)
 
 # Spectral approx along diagonal: k(r/sqrt(2), r/sqrt(2))
@@ -145,14 +145,22 @@ print("Anisotropic kernel")
 print("=" * 60)
 
 l_aniso = [0.05, 0.2]
+domain_aniso = ((0, 1), (0, 1))
 kernel_aniso = SE(lengthscale=l_aniso, variance=variance, dim=2)
-gp_aniso = EFGP(kernel_aniso, L=L, eps=eps)
+gp_aniso = EFGP(kernel_aniso, domain=domain_aniso, eps=eps)
 
 xis_a = gp_aniso.xis
 ws_a = gp_aniso.ws
 M_a = gp_aniso.M
 
+# Anisotropic evaluation grid
+x1_a = jnp.linspace(domain_aniso[0][0], domain_aniso[0][1], n_grid)
+x2_a = jnp.linspace(domain_aniso[1][0], domain_aniso[1][1], n_grid)
+X1_a, X2_a = jnp.meshgrid(x1_a, x2_a, indexing="ij")
+x_flat_a = jnp.stack([X1_a.ravel(), X2_a.ravel()], axis=-1)
+
 print(f"Kernel: SE(l={l_aniso}, var={variance}, dim=2, eps={eps})")
+print(f"Domain: {domain_aniso}")
 print(f"Spectral grid: {gp_aniso.OUT[0]} x {gp_aniso.OUT[1]} = {M_a} frequencies")
 
 fig2, axes2 = plt.subplots(2, 2, figsize=(12, 10))
@@ -178,7 +186,7 @@ ax.set_aspect("equal")
 
 # --- Panel 2: Kernel slices along each axis ---
 ax = axes2[0, 1]
-r = jnp.linspace(0, L, 300)
+r = jnp.linspace(0, gp_aniso.L, 300)
 # Exact anisotropic: k(r,0) = var * exp(-0.5 * r^2 / l1^2)
 K_exact_x1 = variance * jnp.exp(-0.5 * r ** 2 / l_aniso[0] ** 2)
 K_exact_x2 = variance * jnp.exp(-0.5 * r ** 2 / l_aniso[1] ** 2)
@@ -216,10 +224,10 @@ ax.set_aspect("equal")
 
 # --- Panel 4: Anisotropic prior sample ---
 ax = axes2[1, 1]
-sample_aniso = gp_aniso.sample(x_flat, key, n_samples=1)
+sample_aniso = gp_aniso.sample(x_flat_a, key, n_samples=1)
 sample_aniso_grid = np.array(sample_aniso.reshape(n_grid, n_grid))
 
-im = ax.pcolormesh(np.array(x1), np.array(x2), sample_aniso_grid.T,
+im = ax.pcolormesh(np.array(x1_a), np.array(x2_a), sample_aniso_grid.T,
                    shading="auto", cmap="RdBu_r")
 fig2.colorbar(im, ax=ax, shrink=0.8)
 ax.set_xlabel("$x_1$")

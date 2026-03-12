@@ -6,7 +6,7 @@ import jax.numpy as jnp
 import pytest
 
 from efgp_jax.kernels import SE, Matern
-from efgp_jax.efgp import efgp_gradient, efgp_predict, efgp_predict_var
+from efgp_jax.efgp import EFGP
 from efgp_jax.gp import predict as gp_predict, posterior_covariance
 
 
@@ -21,12 +21,9 @@ def test_efgp_gradient_shape():
     x, y = _toy_data()
     kernel = SE(lengthscale=0.3, variance=1.0, dim=1)
     key = jax.random.PRNGKey(1)
-    grad = efgp_gradient(
-        x, y, sigmasq=0.01,
-        kernel=kernel,
-        eps=1e-2, trace_samples=5,
-        key=key,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=1e-2)
+    posterior = gp.condition(x, y, 0.01)
+    grad = posterior.gradient(key, trace_samples=5)
     assert grad.shape == (3,)
     assert jnp.all(jnp.isfinite(grad))
 
@@ -35,11 +32,10 @@ def test_efgp_gradient_with_log_marginal():
     x, y = _toy_data()
     kernel = SE(lengthscale=0.3, variance=1.0, dim=1)
     key = jax.random.PRNGKey(2)
-    grad, lml = efgp_gradient(
-        x, y, sigmasq=0.01,
-        kernel=kernel,
-        eps=1e-2, trace_samples=5,
-        key=key,
+    gp = EFGP(kernel, domain=(0, 1), eps=1e-2)
+    posterior = gp.condition(x, y, 0.01)
+    grad, lml = posterior.gradient(
+        key, trace_samples=5,
         compute_log_marginal=True,
         log_marginal_probes=10,
         log_marginal_steps=10,
@@ -59,11 +55,9 @@ def test_efgp_predict_matches_vanilla():
     mean_gp = gp_predict(x, y, x_new, sigmasq, kernel)
 
     # EFGP
-    mean_efgp = efgp_predict(
-        x, y, x_new,
-        kernel=kernel,
-        sigmasq=sigmasq, eps=1e-6,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=1e-6)
+    posterior = gp.condition(x, y, sigmasq)
+    mean_efgp = posterior.predict(x_new)
 
     assert jnp.allclose(mean_gp, mean_efgp, atol=0.05)
 
@@ -75,10 +69,9 @@ def test_efgp_predict_var():
     sigmasq = 0.01
     x_new = jnp.linspace(0.1, 0.9, 5)
 
-    yhat, var = efgp_predict_var(
-        x, y, x_new, kernel=kernel,
-        sigmasq=sigmasq, eps=1e-6,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=1e-6)
+    posterior = gp.condition(x, y, sigmasq)
+    yhat, var = posterior.predict(x_new, return_var=True)
     assert yhat.shape == (5,)
     assert var.shape == (5,)
     assert jnp.all(var >= 0)
@@ -90,22 +83,21 @@ def test_efgp_predict_var():
 
 
 def test_efgp_matern():
-    """Run efgp_predict with Matérn kernel."""
+    """Run EFGP predict with Matern kernel."""
     x, y = _toy_data(n=30)
     kernel = Matern(lengthscale=0.3, variance=1.0, nu=2.5, dim=1)
     sigmasq = 0.01
     x_new = jnp.linspace(0.1, 0.9, 10)
 
-    mean_efgp = efgp_predict(
-        x, y, x_new, kernel=kernel,
-        sigmasq=sigmasq, eps=1e-4,
-    )
+    gp = EFGP(kernel, domain=(0, 1), eps=1e-4)
+    posterior = gp.condition(x, y, sigmasq)
+    mean_efgp = posterior.predict(x_new)
     assert mean_efgp.shape == (10,)
     assert jnp.all(jnp.isfinite(mean_efgp))
 
 
 def test_efgp_2d():
-    """Small 2D dataset, check efgp_predict shape."""
+    """Small 2D dataset, check EFGP predict shape."""
     key = jax.random.PRNGKey(42)
     k1, k2 = jax.random.split(key)
     x = jax.random.uniform(k1, (30, 2))
@@ -115,9 +107,8 @@ def test_efgp_2d():
     kernel = SE(lengthscale=0.3, variance=1.0, dim=2)
     sigmasq = 0.01
 
-    mean_efgp = efgp_predict(
-        x, y, x_new, kernel=kernel,
-        sigmasq=sigmasq, eps=1e-3,
-    )
+    gp = EFGP(kernel, domain=((0, 1), (0, 1)), eps=1e-3)
+    posterior = gp.condition(x, y, sigmasq)
+    mean_efgp = posterior.predict(x_new)
     assert mean_efgp.shape == (5,)
     assert jnp.all(jnp.isfinite(mean_efgp))

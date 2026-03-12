@@ -93,8 +93,7 @@ print("\n--- Posterior prediction ---")
 n_new = 1000
 x_new = jnp.linspace(0, 1, n_new)
 
-domain_L = float(jnp.max(x) - jnp.min(x))
-gp = EFGP(kernel_learned, L=domain_L, eps=EPSILON)
+gp = EFGP(kernel_learned, domain=(float(jnp.min(x)), float(jnp.max(x))), eps=EPSILON)
 posterior = gp.condition(x, y, sig2_final)
 
 # -----------------------------------------------------------------------

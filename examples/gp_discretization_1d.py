@@ -28,23 +28,23 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # -----------------------------------------------------------------------
 # Setup
 # -----------------------------------------------------------------------
-L = 1.0
+domain = (0, 1)
 lengthscale = 0.05
 variance = 1.0
 eps = 1e-4
 
 kernel = SE(lengthscale=lengthscale, variance=variance, dim=1)
-gp = EFGP(kernel, L=L, eps=eps)
+gp = EFGP(kernel, domain=domain, eps=eps)
 
 xis = gp.xis.ravel()
 ws = gp.ws
 M = gp.M
 
 print(f"Kernel: SE(l={lengthscale}, var={variance}, eps={eps})")
-print(f"Domain: [0, {L}],  eps={eps}")
+print(f"Domain: {domain},  eps={eps}")
 print(f"Spectral grid: M={M} frequencies, spacing h={gp.h:.6f}")
 
-x = jnp.linspace(0, L, 1000)
+x = jnp.linspace(domain[0], domain[1], 1000)
 
 # -----------------------------------------------------------------------
 # Figure
@@ -68,7 +68,7 @@ ax.legend(fontsize=7, loc="upper right")
 
 # --- Panel 2: Exact kernel vs spectral approximation ---
 ax = axes[0, 1]
-r = jnp.linspace(0, L, 500)
+r = jnp.linspace(0, gp.L, 500)
 K_exact = kernel(r)
 ws_sq = jnp.real(ws ** 2)
 K_approx = jnp.array([jnp.sum(ws_sq * jnp.cos(2 * math.pi * xis * float(ri)))
