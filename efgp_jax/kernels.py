@@ -5,7 +5,6 @@ from typing import Callable, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import Array
 from jax.tree_util import register_pytree_node_class
 

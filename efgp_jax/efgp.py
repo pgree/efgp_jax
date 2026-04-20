@@ -8,8 +8,6 @@ import jax.numpy as jnp
 from jax import Array
 from jax.tree_util import register_pytree_node_class
 
-import numpy as np
-
 from .kernels import Kernel, SE
 from .quadrature import get_xis
 from .cg import cg_solve, cg_solve_batched
