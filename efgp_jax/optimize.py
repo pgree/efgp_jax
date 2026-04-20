@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jax import Array
 from scipy.optimize import minimize as sp_minimize
 
-from .kernels import Kernel, SE, Matern
+from .kernels import Kernel, SE, Matern, log_marginal
 from .efgp import EFGP
 
 
@@ -149,3 +149,89 @@ def optimize_hyperparameters(
     }
 
     return kernel_final, sigmasq_final, info
+
+
+# ---------------------------------------------------------------------------
+# Alternative: exact MLL via jaxopt (pytree-native, pure JAX)
+# ---------------------------------------------------------------------------
+
+def optimize_hyperparameters_exact(
+    x: Array,
+    y: Array,
+    kernel0: Kernel,
+    sigmasq0: float,
+    *,
+    maxiter: int = 100,
+    tol: float = 1e-6,
+    verbose: bool = False,
+) -> Tuple[Kernel, float, dict]:
+    """Exact MLL optimization via jaxopt L-BFGS (Cholesky-based, O(N^3)).
+
+    Alternative to :func:`optimize_hyperparameters`.  Leverages the
+    pytree-registered kernel: parameters are ``(log_kernel, log_sigmasq)``
+    where ``log_kernel`` is a ``SE``/``Matern`` whose leaves are log-hypers.
+    ``jaxopt.LBFGS`` treats this as a standard pytree and handles the
+    flatten/unflatten internally.  Gradients come from ``jax.grad`` through
+    the Cholesky in :func:`log_marginal`, so they are exact (no Hutchinson /
+    SLQ noise).
+
+    Suitable for small-to-moderate ``N`` (typically up to a few thousand).
+    For large ``N`` use :func:`optimize_hyperparameters`, which uses EFGP +
+    stochastic gradient estimators.
+
+    Parameters
+    ----------
+    x, y : Array
+        Training data.
+    kernel0 : Kernel
+        Initial kernel (hyperparameters in natural space).
+    sigmasq0 : float
+        Initial noise variance.
+    maxiter : int
+        Max L-BFGS iterations.
+    tol : float
+        Gradient-norm tolerance for convergence.
+    verbose : bool
+        If True, jaxopt prints progress.
+
+    Returns
+    -------
+    kernel : Kernel
+        Optimized kernel (same subclass as ``kernel0``).
+    sigmasq : float
+        Optimized noise variance.
+    info : dict
+        Keys: ``nll``, ``n_iter``, ``grad_norm``.
+    """
+    try:
+        import jaxopt
+    except ImportError as e:
+        raise ImportError(
+            "optimize_hyperparameters_exact requires jaxopt "
+            "(`pip install jaxopt`)."
+        ) from e
+
+    # Parameters: log-space for positivity. Kernel is a pytree, so tree_map
+    # applies jnp.log to lengthscale and variance leaves, leaving aux intact.
+    log_kernel0 = jax.tree_util.tree_map(jnp.log, kernel0)
+    log_sig0 = jnp.log(jnp.asarray(sigmasq0))
+
+    def nll(params):
+        log_kernel, log_sig = params
+        kernel = jax.tree_util.tree_map(jnp.exp, log_kernel)
+        sigmasq = jnp.exp(log_sig)
+        return -log_marginal(x, y, sigmasq, kernel)
+
+    solver = jaxopt.LBFGS(fun=nll, maxiter=maxiter, tol=tol, verbose=verbose)
+    params_opt, state = solver.run((log_kernel0, log_sig0))
+
+    log_kernel_fin, log_sig_fin = params_opt
+    kernel_fin = jax.tree_util.tree_map(jnp.exp, log_kernel_fin)
+    sigmasq_fin = float(jnp.exp(log_sig_fin))
+
+    info = {
+        'nll': float(state.value),
+        'n_iter': int(state.iter_num),
+        'grad_norm': float(state.error),
+    }
+    return kernel_fin, sigmasq_fin, info
