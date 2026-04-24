@@ -2,13 +2,15 @@
 
 import math
 from math import prod
-from typing import NamedTuple, List
+from typing import List
 
 import jax.numpy as jnp
 from jax import Array
+from jax.tree_util import register_pytree_node_class
 
 
-class ToeplitzND(NamedTuple):
+@register_pytree_node_class
+class ToeplitzND:
     """Cached FFT of the Toeplitz kernel for fast mat-vec products.
 
     Attributes:
@@ -17,12 +19,39 @@ class ToeplitzND(NamedTuple):
         fft_shape: Padded FFT grid dimensions.
         starts: Start indices for central-block extraction.
         ends: End indices for central-block extraction.
+
+    Registered as a JAX pytree: ``v_fft`` is the sole child (leaf), while
+    the integer-list metadata is stored as static aux data so it is
+    hashable and does not show up as leaves.
     """
-    v_fft: Array
-    ns: List[int]
-    fft_shape: List[int]
-    starts: List[int]
-    ends: List[int]
+
+    __slots__ = ("v_fft", "ns", "fft_shape", "starts", "ends")
+
+    def __init__(self, v_fft: Array, ns, fft_shape, starts, ends):
+        self.v_fft = v_fft
+        self.ns = tuple(ns)
+        self.fft_shape = tuple(fft_shape)
+        self.starts = tuple(starts)
+        self.ends = tuple(ends)
+
+    # --- pytree protocol ---------------------------------------------------
+
+    def tree_flatten(self):
+        children = (self.v_fft,)
+        aux = (self.ns, self.fft_shape, self.starts, self.ends)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        ns, fft_shape, starts, ends = aux
+        (v_fft,) = children
+        obj = cls.__new__(cls)
+        obj.v_fft = v_fft
+        obj.ns = ns
+        obj.fft_shape = fft_shape
+        obj.starts = starts
+        obj.ends = ends
+        return obj
 
 
 def make_toeplitz(v: Array, force_pow2: bool = True) -> ToeplitzND:

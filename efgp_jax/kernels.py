@@ -5,8 +5,8 @@ from typing import Callable, Tuple, Union
 
 import jax
 import jax.numpy as jnp
-import numpy as np
 from jax import Array
+from jax.tree_util import register_pytree_node_class
 
 
 # ---------------------------------------------------------------------------
@@ -39,6 +39,7 @@ class Kernel:
 # Squared Exponential
 # ---------------------------------------------------------------------------
 
+@register_pytree_node_class
 class SE(Kernel):
     """Squared Exponential (RBF) kernel.
 
@@ -50,19 +51,45 @@ class SE(Kernel):
     the isotropic case.
     """
 
-    def __init__(self, lengthscale, variance: float, dim: int = 1):
-        l_arr = np.atleast_1d(np.asarray(lengthscale, dtype=float))
-        if l_arr.ndim == 1 and l_arr.size == 1:
-            # scalar — store as plain float, isotropic
-            super().__init__(float(l_arr[0]), variance, dim)
-            self.is_anisotropic = False
+    def __init__(self, lengthscale, variance, dim: int = 1):
+        l_arr = jnp.asarray(lengthscale)
+        # Detect isotropic vs anisotropic based on shape/size.
+        if l_arr.ndim == 0 or l_arr.size == 1:
+            # scalar — store as 0-d jax array, isotropic
+            l_stored = l_arr.reshape(())
+            is_anisotropic = False
         else:
             if l_arr.size != dim:
                 raise ValueError(
                     f"lengthscale array has {l_arr.size} entries but dim={dim}"
                 )
-            super().__init__(l_arr, variance, dim)
-            self.is_anisotropic = True
+            l_stored = l_arr.reshape((dim,))
+            is_anisotropic = True
+
+        self.lengthscale = l_stored
+        self.variance = jnp.asarray(variance)
+        self.dim = dim
+        self.is_anisotropic = is_anisotropic
+
+    # --- pytree protocol ---------------------------------------------------
+
+    def tree_flatten(self):
+        children = (self.lengthscale, self.variance)
+        aux = (self.dim, self.is_anisotropic)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        dim, is_anisotropic = aux
+        lengthscale, variance = children
+        obj = cls.__new__(cls)
+        obj.lengthscale = lengthscale
+        obj.variance = variance
+        obj.dim = dim
+        obj.is_anisotropic = is_anisotropic
+        return obj
+
+    # --- kernel methods ----------------------------------------------------
 
     def __call__(self, r: Array) -> Array:
         if self.is_anisotropic:
@@ -122,13 +149,36 @@ class SE(Kernel):
 # Matérn
 # ---------------------------------------------------------------------------
 
+@register_pytree_node_class
 class Matern(Kernel):
     """Matérn kernel for nu in {0.5, 1.5, 2.5}."""
 
-    def __init__(self, lengthscale: float, variance: float, dim: int = 1,
+    def __init__(self, lengthscale, variance, dim: int = 1,
                  nu: float = 2.5):
-        super().__init__(lengthscale, variance, dim)
+        self.lengthscale = jnp.asarray(lengthscale)
+        self.variance = jnp.asarray(variance)
+        self.dim = dim
         self.nu = nu
+
+    # --- pytree protocol ---------------------------------------------------
+
+    def tree_flatten(self):
+        children = (self.lengthscale, self.variance)
+        aux = (self.dim, self.nu)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        dim, nu = aux
+        lengthscale, variance = children
+        obj = cls.__new__(cls)
+        obj.lengthscale = lengthscale
+        obj.variance = variance
+        obj.dim = dim
+        obj.nu = nu
+        return obj
+
+    # --- kernel methods ----------------------------------------------------
 
     def __call__(self, r: Array) -> Array:
         l = self.lengthscale

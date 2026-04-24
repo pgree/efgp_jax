@@ -6,8 +6,7 @@ from typing import Tuple
 import jax
 import jax.numpy as jnp
 from jax import Array
-
-import numpy as np
+from jax.tree_util import register_pytree_node_class
 
 from .kernels import Kernel, SE
 from .quadrature import get_xis
@@ -27,8 +26,8 @@ def _parse_domain(domain, d):
     Parameters
     ----------
     domain : tuple
-        1D: (lo, hi) — a single interval.
-        nD: ((lo1, hi1), (lo2, hi2), ...) — one interval per dimension.
+        ``(lo, hi)`` — a single interval, broadcast to all ``d`` dimensions.
+        ``((lo1, hi1), (lo2, hi2), ...)`` — one interval per dimension.
 
     Returns
     -------
@@ -37,19 +36,18 @@ def _parse_domain(domain, d):
     xcen : array, shape (d,)
         Midpoint of the domain.
     """
-    # 1D shorthand: (lo, hi)
-    if d == 1 and not isinstance(domain[0], (tuple, list)):
+    # (lo, hi) shorthand — broadcast to all dimensions
+    if not isinstance(domain[0], (tuple, list)):
         lo, hi = float(domain[0]), float(domain[1])
-        return hi - lo, jnp.array([(lo + hi) / 2.0])
+        domain = tuple((lo, hi) for _ in range(d))
 
-    # nD: tuple of intervals
     assert len(domain) == d, f"Expected {d} intervals, got {len(domain)}"
     los = [float(interval[0]) for interval in domain]
     his = [float(interval[1]) for interval in domain]
     extents = [hi - lo for lo, hi in zip(los, his)]
     centers = [(lo + hi) / 2.0 for lo, hi in zip(los, his)]
     L = max(extents)
-    return L, jnp.array(centers)
+    return jnp.asarray(L), jnp.array(centers)
 
 
 def _compute_convolution_vector(m, x, h, xcen, nufft_eps=6e-8):
@@ -147,7 +145,7 @@ def logdet_slq(
     steps: int = 25,
     key: Array,
     n: int,
-) -> float:
+) -> Array:
     """Estimate log det(I + sigma^{-2} D T D) via Hutchinson + Lanczos.
 
     Parameters
@@ -161,7 +159,7 @@ def logdet_slq(
 
     Returns
     -------
-    float
+    Array
     """
     ws_real = jnp.real(ws)
     m = ws_real.size
@@ -203,7 +201,7 @@ def logdet_slq(
         return quad
 
     quads = jax.vmap(_lanczos_one)(keys)
-    logdet = float(jnp.mean(quads)) + n * math.log(sigma2)
+    logdet = jnp.mean(quads) + n * jnp.log(sigma2)
     return logdet
 
 
@@ -211,6 +209,7 @@ def logdet_slq(
 # EFGP class
 # ---------------------------------------------------------------------------
 
+@register_pytree_node_class
 class EFGP:
     """Spectral approximation of a GP prior.
 
@@ -278,12 +277,67 @@ class EFGP:
             OUT = (mtot,) * d
 
         self.xis = xis
-        self.h = h
+        self.h = jnp.asarray(h)
         self.mtot = mtot
         self.ws = ws
         self.OUT = OUT
         self.cdtype = cdtype
         self.M = ws.shape[0]
+
+    # --- pytree protocol ---------------------------------------------------
+
+    def tree_flatten(self):
+        children = (self.kernel, self.xis, self.h, self.ws, self.xcen, self.L)
+        aux = (
+            self.domain,
+            self.eps,
+            self.nufft_eps,
+            self.cg_tol,
+            self.use_integral,
+            self.use_precond,
+            self.d,
+            self.mtot,
+            self.OUT,
+            self.cdtype,
+            self.M,
+        )
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        (
+            domain,
+            eps,
+            nufft_eps,
+            cg_tol,
+            use_integral,
+            use_precond,
+            d,
+            mtot,
+            OUT,
+            cdtype,
+            M,
+        ) = aux
+        kernel, xis, h, ws, xcen, L = children
+        obj = cls.__new__(cls)
+        obj.kernel = kernel
+        obj.domain = domain
+        obj.eps = eps
+        obj.nufft_eps = nufft_eps
+        obj.cg_tol = cg_tol
+        obj.use_integral = use_integral
+        obj.use_precond = use_precond
+        obj.d = d
+        obj.L = L
+        obj.xcen = xcen
+        obj.xis = xis
+        obj.h = h
+        obj.mtot = mtot
+        obj.ws = ws
+        obj.OUT = OUT
+        obj.cdtype = cdtype
+        obj.M = M
+        return obj
 
     def sample(self, x, key, n_samples=1, *, nufft_eps=1e-12):
         """Draw samples from the GP prior at locations x.
@@ -376,6 +430,7 @@ class EFGP:
         return EFGPPosterior(self, x, y, sigmasq)
 
 
+@register_pytree_node_class
 class EFGPPosterior:
     """Posterior GP conditioned on observations.
 
@@ -397,7 +452,7 @@ class EFGPPosterior:
         self.x = x
         self.N = x.shape[0]
         self.y = y
-        self.sigmasq = sigmasq
+        self.sigmasq = jnp.asarray(sigmasq)
         self._beta = None  # lazily computed CG solution
 
         # Compute NUFFT phases and Toeplitz operator for training locations
@@ -411,6 +466,36 @@ class EFGPPosterior:
             m_conv, x, p.h, p.xcen, p.nufft_eps
         ).astype(p.cdtype)
         self.toeplitz_op = make_toeplitz(v_kernel, force_pow2=True)
+
+    # --- pytree protocol ---------------------------------------------------
+
+    def tree_flatten(self):
+        children = (
+            self.prior,
+            self.x,
+            self.y,
+            self.sigmasq,
+            self.phi,
+            self.toeplitz_op,
+            self._beta,
+        )
+        aux = (self.N,)
+        return children, aux
+
+    @classmethod
+    def tree_unflatten(cls, aux, children):
+        (N,) = aux
+        prior, x, y, sigmasq, phi, toeplitz_op, _beta = children
+        obj = cls.__new__(cls)
+        obj.prior = prior
+        obj.x = x
+        obj.y = y
+        obj.sigmasq = sigmasq
+        obj.phi = phi
+        obj.toeplitz_op = toeplitz_op
+        obj._beta = _beta
+        obj.N = N
+        return obj
 
     def _solve(self):
         """Solve for the mean coefficients (cached)."""
@@ -520,7 +605,8 @@ class EFGPPosterior:
         """Gradient of the negative log marginal likelihood w.r.t. hyperparameters.
 
         Returns grad of shape (num_hypers,) = [d/dl, d/dvar, d/dsigmasq].
-        If compute_log_marginal is True, returns (grad, log_marginal).
+        If ``compute_log_marginal`` is True, returns ``(grad, log_marginal)``
+        where ``log_marginal`` is a JAX scalar array (not a Python float).
         """
         p = self.prior
         cg_tol = p.cg_tol
@@ -558,7 +644,7 @@ class EFGPPosterior:
         Hk = Dprime.shape[-1]  # number of kernel hyperparameters
         term2_parts = [jnp.vdot(fadj_alpha, Dprime[:, i] * fadj_alpha) for i in range(Hk)]
         term2_parts.append(jnp.vdot(alpha, alpha))
-        term2 = jnp.array(term2_parts)
+        term2 = jnp.stack(term2_parts)
 
         # Monte-Carlo trace (term 1)
         T = trace_samples
@@ -630,6 +716,6 @@ class EFGPPosterior:
             )
             vdot_term = jnp.vdot(self.y.astype(cdtype), alpha).real
             log_marg = -0.5 * vdot_term - 0.5 * det_term - 0.5 * N * math.log(2 * math.pi)
-            return jnp.real(grad), float(log_marg)
+            return jnp.real(grad), log_marg
 
         return jnp.real(grad)
