@@ -45,7 +45,7 @@ y = jnp.sin(6 * x) + 0.1 * jax.random.normal(jax.random.PRNGKey(0), (1000,))
 
 # Build EFGP model and condition on data
 kernel = SE(lengthscale=0.1, variance=1.0, dim=1)
-gp = EFGP(kernel, L=1.0, eps=1e-4)
+gp = EFGP(kernel, domain=(0, 1), eps=1e-4)
 posterior = gp.condition(x, y, sigmasq=0.01)
 
 # Posterior mean and variance
@@ -66,10 +66,10 @@ python examples/time_series.py
 
 ## GP discretization
 
-The `examples/gp_discretization.py` script visualizes the spectral representation: basis functions, kernel approximation, spectral density with quadrature nodes, and prior samples.
+The `examples/gp_discretization_1d.py` script visualizes the spectral representation: basis functions, kernel approximation, spectral density with quadrature nodes, and prior samples. A 2D version is in `examples/gp_discretization_2d.py`.
 
 ```bash
-python examples/gp_discretization.py
+python examples/gp_discretization_1d.py
 ```
 
 ## Testing
