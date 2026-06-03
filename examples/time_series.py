@@ -33,9 +33,9 @@ print("Time series example: hyperparameter learning with EFGP")
 print("=" * 60)
 
 np.random.seed(1)
-n = 18_000
+n = 1_000
 d = 1
-true_lengthscale = 0.05
+true_lengthscale = 0.1
 true_variance = 1.0
 true_noise_var = 0.01  # (0.1)^2
 
