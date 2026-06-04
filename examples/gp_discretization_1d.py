@@ -29,9 +29,9 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 # Setup
 # -----------------------------------------------------------------------
 domain = (0, 1)
-lengthscale = 0.05
+lengthscale = 0.2
 variance = 1.0
-eps = 1e-4
+eps = 1e-2
 
 kernel = SE(lengthscale=lengthscale, variance=variance, dim=1)
 gp = EFGP(kernel, domain=domain, eps=eps)
@@ -43,7 +43,7 @@ M = gp.M
 print(f"Kernel: SE(l={lengthscale}, var={variance}, eps={eps})")
 print(f"Domain: {domain},  eps={eps}")
 print(f"Spectral grid: M={M} frequencies, spacing h={gp.h:.6f}")
-
+print(f"weights: {jnp.real(ws) / jnp.max(jnp.real(ws))}")
 x = jnp.linspace(domain[0], domain[1], 1000)
 
 # -----------------------------------------------------------------------
@@ -68,15 +68,16 @@ ax.legend(fontsize=7, loc="upper right")
 
 # --- Panel 2: Exact kernel vs spectral approximation ---
 ax = axes[0, 1]
-r = jnp.linspace(0, gp.L, 500)
+r = jnp.linspace(-gp.L, gp.L, 500)
 K_exact = kernel(r)
 ws_sq = jnp.real(ws ** 2)
 K_approx = jnp.array([jnp.sum(ws_sq * jnp.cos(2 * math.pi * xis * float(ri)))
                        for ri in r])
-
+print(f'max kernel error: {np.max(np.abs(np.array(K_exact) - np.array(K_approx)))}')
 ax.plot(np.array(r), np.array(K_exact), 'k-', linewidth=2, label="exact $k(r)$")
 ax.plot(np.array(r), np.array(K_approx), 'r--', linewidth=1.5,
         label=f"spectral approx (M={M})")
+# ax.plot(np.array(r), np.log10(np.abs(np.array(K_exact) - np.array(K_approx))), 'k-', linewidth=2, label="error")
 ax.set_xlabel("r")
 ax.set_ylabel("k(r)")
 ax.set_title("Kernel: exact vs spectral approximation")

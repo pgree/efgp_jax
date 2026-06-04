@@ -56,6 +56,9 @@ yhat, var = posterior.predict(x_new, return_var=True)
 samples = posterior.sample(x_new, key=jax.random.PRNGKey(1), n_samples=10)
 ```
 
+To fit the hyperparameters from data (rather than setting them by hand), see
+[Hyperparameter learning](#hyperparameter-learning) below.
+
 ## Hyperparameter learning
 
 The `examples/time_series.py` script demonstrates the full pipeline: data generation, hyperparameter optimization via EFGP + L-BFGS, and posterior prediction with sampling.
@@ -64,9 +67,15 @@ The `examples/time_series.py` script demonstrates the full pipeline: data genera
 python examples/time_series.py
 ```
 
+The `examples/hyperparameter_fitting.py` draws data from a GP prior with known hyperparameters, fits hyperparameters, and compares the fitted hyperparameters to the groundtruth
+
+```bash
+python examples/hyperparameter_fitting.py
+```
+
 ## GP discretization
 
-The `examples/gp_discretization_1d.py` script visualizes the spectral representation: basis functions, kernel approximation, spectral density with quadrature nodes, and prior samples. A 2D version is in `examples/gp_discretization_2d.py`.
+The `examples/gp_discretization_1d.py` script visualizes the Fourier representation: basis functions, kernel approximation, spectral density with quadrature nodes, and prior samples. A 2D version is in `examples/gp_discretization_2d.py`.
 
 ```bash
 python examples/gp_discretization_1d.py

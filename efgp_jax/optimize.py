@@ -95,9 +95,6 @@ def optimize_hyperparameters(
         else:
             return SE(lengthscale=l_val, variance=var_val, dim=kernel0.dim)
 
-    # Mutable key state for the objective function
-    state = {'key': key}
-
     theta0 = np.array([
         np.log(kernel0.lengthscale),
         np.log(kernel0.variance),
@@ -105,7 +102,12 @@ def optimize_hyperparameters(
     ])
 
     def objective(log_theta):
-        state['key'], subkey = jax.random.split(state['key'])
+        # Common random numbers: hold the PRNG key FIXED across all evaluations
+        # so the SLQ/Hutchinson estimates of the NLL and its gradient are a
+        # consistent (deterministic) function of the hyperparameters. L-BFGS-B's
+        # line search and curvature estimates require this; re-randomizing every
+        # call makes the objective a moving target and causes premature, wrong
+        # "convergence".
         l_val = float(np.exp(log_theta[0]))
         var_val = float(np.exp(log_theta[1]))
         sig2_val = float(np.exp(log_theta[2]))
@@ -116,7 +118,7 @@ def optimize_hyperparameters(
                    use_integral=use_integral, use_precond=use_precond)
         posterior = gp.condition(x, y, sig2_val)
         grad, lml = posterior.gradient(
-            subkey,
+            key,
             trace_samples=trace_samples,
             compute_log_marginal=True,
             log_marginal_probes=log_marginal_probes,
