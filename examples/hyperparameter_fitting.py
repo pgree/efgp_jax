@@ -34,6 +34,7 @@ from efgp_jax.optimize import optimize_hyperparameters
 # -----------------------------------------------------------------------
 # 1) Generate data from a GP prior with KNOWN ("true") hyperparameters
 # -----------------------------------------------------------------------
+print("[1/4] Generating data from GP prior", flush=True)
 l_true, var_true, sigmasq_true = 0.15, 2.0, 0.05
 domain = (0, 10)  # spans ~67 lengthscales so all 3 params are identifiable
 x = jnp.linspace(*domain, 4000)
@@ -44,12 +45,13 @@ y = f + jnp.sqrt(sigmasq_true) * jax.random.normal(jax.random.PRNGKey(1), x.shap
 # -----------------------------------------------------------------------
 # 2) Fit hyperparameters from deliberately-wrong initial values
 # -----------------------------------------------------------------------
+print("[2/4] Fitting hyperparameters", flush=True)
 kernel0 = SE(lengthscale=0.5, variance=0.5, dim=1)
 sigmasq0 = 0.2
 kernel, sigmasq, info = optimize_hyperparameters(
     x, y, kernel0, sigmasq0=sigmasq0, eps=1e-4,
     domain=domain, key=jax.random.PRNGKey(2),
-    trace_samples=50, verbose=False,
+    trace_samples=50, verbose=True,
 )
 
 print(f"{'param':<12}{'true':>10}{'init':>10}{'recovered':>12}")
@@ -61,17 +63,19 @@ print(f"\nNLL={info['nll']:.2f}  nfev={info['nfev']}  success={info['success']}"
 # -----------------------------------------------------------------------
 # 3) Condition on the data with the fitted hyperparameters
 # -----------------------------------------------------------------------
+print("[3/4] Sample from GP posterior with (fixed) fitted hyperparameters", flush=True)
 gp = EFGP(kernel, domain=domain, eps=1e-4)
 posterior = gp.condition(x, y, sigmasq=sigmasq)
 
 x_new = jnp.linspace(*domain, 500)
 yhat, var = posterior.predict(x_new, return_var=True)
-sd = jnp.sqrt(jnp.clip(var, a_min=0.0))
+sd = jnp.sqrt(jnp.clip(var, min=0.0))
 samples = posterior.sample(x_new, key=jax.random.PRNGKey(3), n_samples=10)
 
 # -----------------------------------------------------------------------
 # 4) Plot
 # -----------------------------------------------------------------------
+print("[4/4] Plotting", flush=True)
 fig, ax = plt.subplots(figsize=(10, 6))
 ax.scatter(x, y, s=5, color="0.6", alpha=0.4, label="data")
 ax.plot(x_new, samples.T, color="C1", lw=0.7, alpha=0.5)
