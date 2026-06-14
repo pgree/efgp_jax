@@ -7,8 +7,6 @@ import jax
 import jax.numpy as jnp
 from jax import Array
 
-import numpy as np
-
 from .kernels import Kernel, SE
 from .quadrature import get_xis
 from .cg import cg_solve, cg_solve_batched
@@ -27,8 +25,8 @@ def _parse_domain(domain, d):
     Parameters
     ----------
     domain : tuple
-        1D: (lo, hi) — a single interval.
-        nD: ((lo1, hi1), (lo2, hi2), ...) — one interval per dimension.
+        ``(lo, hi)`` — a single interval, broadcast to all ``d`` dimensions.
+        ``((lo1, hi1), (lo2, hi2), ...)`` — one interval per dimension.
 
     Returns
     -------
@@ -37,19 +35,18 @@ def _parse_domain(domain, d):
     xcen : array, shape (d,)
         Midpoint of the domain.
     """
-    # 1D shorthand: (lo, hi)
-    if d == 1 and not isinstance(domain[0], (tuple, list)):
+    # (lo, hi) shorthand — broadcast to all dimensions
+    if not isinstance(domain[0], (tuple, list)):
         lo, hi = float(domain[0]), float(domain[1])
-        return hi - lo, jnp.array([(lo + hi) / 2.0])
+        domain = tuple((lo, hi) for _ in range(d))
 
-    # nD: tuple of intervals
     assert len(domain) == d, f"Expected {d} intervals, got {len(domain)}"
     los = [float(interval[0]) for interval in domain]
     his = [float(interval[1]) for interval in domain]
     extents = [hi - lo for lo, hi in zip(los, his)]
     centers = [(lo + hi) / 2.0 for lo, hi in zip(los, his)]
     L = max(extents)
-    return L, jnp.array(centers)
+    return jnp.asarray(L), jnp.array(centers)
 
 
 def _compute_convolution_vector(m, x, h, xcen, nufft_eps=6e-8):

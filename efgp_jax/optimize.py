@@ -8,7 +8,7 @@ import jax.numpy as jnp
 from jax import Array
 from scipy.optimize import minimize as sp_minimize
 
-from .kernels import Kernel, SE, Matern
+from .kernels import Kernel, SE, Matern, log_marginal
 from .efgp import EFGP
 
 
@@ -151,3 +151,97 @@ def optimize_hyperparameters(
     }
 
     return kernel_final, sigmasq_final, info
+
+
+# ---------------------------------------------------------------------------
+# Alternative: exact MLL via autodiff (Cholesky-based, O(N^3))
+# ---------------------------------------------------------------------------
+
+def optimize_hyperparameters_autodiff(
+    x: Array,
+    y: Array,
+    kernel0: Kernel,
+    sigmasq0: float,
+    *,
+    maxiter: int = 100,
+    tol: float = 1e-6,
+    verbose: bool = False,
+) -> Tuple[Kernel, float, dict]:
+    """Exact MLL optimization via L-BFGS-B with autodiff gradients (Cholesky-based, O(N^3)).
+
+    Alternative to :func:`optimize_hyperparameters`.  Leverages the
+    pytree-registered kernel: parameters are ``(log_kernel, log_sigmasq)``
+    where ``log_kernel`` is a ``SE``/``Matern`` whose leaves are log-hypers.
+    Gradients come from ``jax.value_and_grad`` through the Cholesky in
+    :func:`log_marginal`, so they are exact (no Hutchinson / SLQ noise).
+
+    Suitable for small-to-moderate ``N`` (typically up to a few thousand).
+    For large ``N`` use :func:`optimize_hyperparameters`, which uses EFGP +
+    stochastic gradient estimators.
+
+    Parameters
+    ----------
+    x, y : Array
+        Training data.
+    kernel0 : Kernel
+        Initial kernel (hyperparameters in natural space).
+    sigmasq0 : float
+        Initial noise variance.
+    maxiter : int
+        Max L-BFGS iterations.
+    tol : float
+        Gradient-norm tolerance for convergence.
+    verbose : bool
+
+    Returns
+    -------
+    kernel : Kernel
+        Optimized kernel (same subclass as ``kernel0``).
+    sigmasq : float
+        Optimized noise variance.
+    info : dict
+        Keys: ``nll``, ``nfev``, ``success``.
+    """
+    log_kernel0 = jax.tree_util.tree_map(jnp.log, kernel0)
+    log_sig0 = jnp.log(jnp.asarray(sigmasq0))
+
+    params0 = (log_kernel0, log_sig0)
+    leaves0, treedef = jax.tree_util.tree_flatten(params0)
+    theta0 = np.array([float(l) for l in leaves0])
+
+    def nll(params):
+        log_kernel, log_sig = params
+        kernel = jax.tree_util.tree_map(jnp.exp, log_kernel)
+        sigmasq = jnp.exp(log_sig)
+        return -log_marginal(x, y, sigmasq, kernel)
+
+    nll_and_grad = jax.value_and_grad(nll)
+
+    def objective(theta):
+        params = jax.tree_util.tree_unflatten(treedef, jnp.array(theta))
+        val, grads = nll_and_grad(params)
+        grad_leaves = jax.tree_util.tree_leaves(grads)
+        grad_flat = np.array([float(g) for g in grad_leaves], dtype=np.float64)
+
+        if verbose:
+            log_k, log_s = params
+            k = jax.tree_util.tree_map(jnp.exp, log_k)
+            print(f"  l={float(k.lengthscale):.4f}  var={float(k.variance):.4f}  "
+                  f"noise={float(jnp.exp(log_s)):.4f}  NLL={float(val):.2f}")
+
+        return float(val), grad_flat
+
+    res = sp_minimize(objective, theta0, method='L-BFGS-B', jac=True,
+                      options={'maxiter': maxiter, 'gtol': tol})
+
+    params_opt = jax.tree_util.tree_unflatten(treedef, jnp.array(res.x))
+    log_kernel_fin, log_sig_fin = params_opt
+    kernel_fin = jax.tree_util.tree_map(jnp.exp, log_kernel_fin)
+    sigmasq_fin = float(jnp.exp(log_sig_fin))
+
+    info = {
+        'nll': float(res.fun),
+        'nfev': res.nfev,
+        'success': res.success,
+    }
+    return kernel_fin, sigmasq_fin, info
