@@ -77,3 +77,68 @@ def test_predict_matern():
     mean = predict(x, y, x_new, 0.01, kernel)
     assert mean.shape == (20,)
     assert jnp.all(jnp.isfinite(mean))
+
+
+# ---------------------------------------------------------------------------
+# JAX traceability tests
+# ---------------------------------------------------------------------------
+
+
+def test_predict_jittable():
+    """jit(predict) with kernel as a regular pytree arg — no static_argnames."""
+    x, y = _toy_data()
+    kernel = SE(lengthscale=0.3, variance=1.0, dim=1)
+    x_new = jnp.linspace(0, 1, 20)
+
+    jitted = jax.jit(predict)
+    m_ref = predict(x, y, x_new, 0.01, kernel)
+    m_jit = jitted(x, y, x_new, 0.01, kernel)
+
+    assert m_jit.shape == m_ref.shape
+    assert jnp.allclose(m_jit, m_ref, rtol=1e-12, atol=1e-12)
+
+    kernel2 = SE(lengthscale=0.1, variance=1.0, dim=1)
+    m2 = jitted(x, y, x_new, 0.01, kernel2)
+    assert not jnp.allclose(m2, m_jit)
+
+
+def test_predict_jittable_with_variance():
+    """jit(predict, compute_var=True) — compute_var is a static Python bool."""
+    x, y = _toy_data()
+    kernel = SE(lengthscale=0.3, variance=1.0, dim=1)
+    x_new = jnp.linspace(0, 1, 20)
+
+    jitted = jax.jit(predict, static_argnames=("compute_var",))
+    mean_ref, var_ref = predict(x, y, x_new, 0.01, kernel, compute_var=True)
+    mean_jit, var_jit = jitted(x, y, x_new, 0.01, kernel, compute_var=True)
+
+    assert jnp.allclose(mean_jit, mean_ref, rtol=1e-12, atol=1e-12)
+    assert jnp.allclose(var_jit, var_ref, rtol=1e-10, atol=1e-12)
+
+
+def test_posterior_covariance_jittable():
+    x, _ = _toy_data()
+    kernel = SE(lengthscale=0.3, variance=1.0, dim=1)
+    x_trgs = jnp.linspace(0, 1, 15)
+
+    jitted = jax.jit(posterior_covariance)
+    c_ref = posterior_covariance(x, x_trgs, 0.01, kernel)
+    c_jit = jitted(x, x_trgs, 0.01, kernel)
+
+    assert c_jit.shape == c_ref.shape
+    assert jnp.allclose(c_jit, c_ref, rtol=1e-12, atol=1e-12)
+
+
+def test_sample_posterior_jittable():
+    """jit(sample_posterior) — n_samples is static (it sets a shape)."""
+    x, y = _toy_data()
+    kernel = SE(lengthscale=0.3, variance=1.0, dim=1)
+    x_new = jnp.linspace(0, 1, 10)
+    key = jax.random.PRNGKey(42)
+
+    jitted = jax.jit(sample_posterior, static_argnames=("n_samples",))
+    s_ref = sample_posterior(x, y, x_new, 0.01, kernel, key, n_samples=5)
+    s_jit = jitted(x, y, x_new, 0.01, kernel, key, n_samples=5)
+
+    assert s_jit.shape == (10, 5)
+    assert jnp.allclose(s_jit, s_ref, rtol=1e-10, atol=1e-10)
