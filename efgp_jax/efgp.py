@@ -205,6 +205,43 @@ def logdet_slq(
 
 
 # ---------------------------------------------------------------------------
+# Random coefficients
+# ---------------------------------------------------------------------------
+
+def _hermitian_normal(key, n_samples, OUT, M, cdtype):
+    """Complex-normal coefficients with enforced conjugate symmetry.
+
+    Draws iid complex-normal ``z`` over the tensor-product frequency grid and
+    symmetrizes so that ``c_{-xi} = conj(c_xi)``.  A field
+    ``sum_j w_j c_j exp(2 pi i xi_j . x)`` built from these coefficients (with
+    real, even weights ``w_j``) is real-valued.
+
+    Parameters
+    ----------
+    key : JAX PRNG key
+    n_samples : int
+    OUT : tuple of int
+        Per-dimension frequency counts (grid shape).
+    M : int
+        Total number of frequencies (``prod(OUT)``).
+    cdtype : complex dtype
+
+    Returns
+    -------
+    Array, shape (n_samples, M), complex, conjugate-symmetric over the grid.
+    """
+    key1, key2 = jax.random.split(key)
+    z_real = jax.random.normal(key1, shape=(n_samples, M))
+    z_imag = jax.random.normal(key2, shape=(n_samples, M))
+    z = (z_real + 1j * z_imag).astype(cdtype).reshape(n_samples, *OUT)
+
+    spatial_axes = tuple(range(1, z.ndim))
+    z_flip = jnp.flip(z, axis=spatial_axes)  # z evaluated at -xi
+    c = 0.5 * (z + jnp.conj(z_flip))         # c_{-xi} = conj(c_xi)
+    return c.reshape(n_samples, M)
+
+
+# ---------------------------------------------------------------------------
 # EFGP class
 # ---------------------------------------------------------------------------
 
@@ -301,14 +338,13 @@ class EFGP:
 
         phi = _make_phi(x, self.xcen, self.h)
 
-        # Complex normal: z = a + ib, a,b ~ N(0,1)
-        key1, key2 = jax.random.split(key)
-        z_real = jax.random.normal(key1, shape=(n_samples, self.M))
-        z_imag = jax.random.normal(key2, shape=(n_samples, self.M))
-        z = (z_real + 1j * z_imag).astype(self.cdtype)
+        # Conjugate-symmetric complex normal: c_{-xi} = conj(c_xi), so the
+        # field is real by construction (same distribution as Re(.) of iid z).
+        c = _hermitian_normal(key, n_samples, self.OUT, self.M, self.cdtype)
 
-        # f(x) = sum_j z_j * w_j * exp(2 pi i xi_j . x)
-        wc = self.ws[None, :] * z  # (n_samples, M)
+        # f(x) = sum_j c_j * w_j * exp(2 pi i xi_j . x)  (real-valued)
+        wc = self.ws[None, :] * c  # (n_samples, M)
+        # .real only strips NUFFT roundoff; the true imaginary part is zero.
         samples = jnp.real(nufft_type2(phi, wc.reshape(n_samples, *self.OUT),
                                         eps=nufft_eps))
 
@@ -482,12 +518,11 @@ class EFGPPosterior:
         if x_new.ndim == 1:
             x_new = x_new[:, None]
 
-        key1, key2, key3 = jax.random.split(key, 3)
-        z_real = jax.random.normal(key1, shape=(n_samples, p.M))
-        z_imag = jax.random.normal(key2, shape=(n_samples, p.M))
-        z = (z_real + 1j * z_imag).astype(p.cdtype)
+        key_z, key3 = jax.random.split(key)
+        # Conjugate-symmetric coefficients -> real prior draw by construction.
+        c = _hermitian_normal(key_z, n_samples, p.OUT, p.M, p.cdtype)
 
-        wz = (p.ws[None, :] * z).reshape(n_samples, *p.OUT)
+        wz = (p.ws[None, :] * c).reshape(n_samples, *p.OUT)
         f_prior_x = jnp.real(nufft_type2(self.phi, wz, eps=p.nufft_eps))
 
         phi_new = _make_phi(x_new, p.xcen, p.h)
