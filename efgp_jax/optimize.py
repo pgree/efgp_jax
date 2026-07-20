@@ -10,6 +10,8 @@ from scipy.optimize import minimize as sp_minimize
 
 from .kernels import Kernel, SE, Matern, log_marginal
 from .efgp import EFGP
+# Re-exported for discoverability alongside the other optimizers.
+from .fixed_freq import optimize_hyperparameters_fixed_freq  # noqa: F401
 
 
 def optimize_hyperparameters(
